@@ -1,36 +1,108 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AI Workforce
 
-## Getting Started
+AI Workforce is a Next.js app for designing a multi-agent workflow graph and chatting with each agent using session-based conversations.
 
-First, run the development server:
+## What we are building
+
+- A visual workforce editor using React Flow (`/workforce`)
+- Custom agent nodes with:
+  - name
+  - description
+  - job description
+  - model
+  - skills
+  - avatar emoji
+- Graph persistence to PostgreSQL with Prisma
+- Chat per agent with **task sessions**:
+  - `New Task` creates a fresh chat session
+  - `Previous tasks` lets you reopen older sessions
+  - messages persist across refresh
+
+## Tech stack
+
+- Next.js (App Router)
+- React + TypeScript
+- Tailwind CSS
+- React Flow (`@xyflow/react`)
+- Prisma + PostgreSQL
+
+## Project structure
+
+- `src/app/workforce/page.tsx`: workforce page
+- `src/components/workforce/workforce-graph-editor.tsx`: graph editor + chat UI
+- `src/app/api/workforce-graphs/route.ts`: create/read latest graph
+- `src/app/api/workforce-graphs/[id]/route.ts`: read/update one graph
+- `src/app/api/workforce-graphs/[id]/chat/route.ts`: chat messages API
+- `src/app/api/workforce-graphs/[id]/chat/sessions/route.ts`: chat sessions API
+- `prisma/schema.prisma`: data models
+- `docker-compose.yml`: local PostgreSQL service
+
+## Database models
+
+- `WorkforceGraph`: stores graph metadata and JSON graph payload (`nodes`, `edges`)
+- `WorkforceChatSession`: stores task/session per graph + agent
+- `WorkforceChatMessage`: stores messages inside a session
+
+## Local setup
+
+### 1) Install dependencies
+
+```bash
+npm install
+```
+
+### 2) Start PostgreSQL
+
+```bash
+docker compose up -d
+```
+
+### 3) Configure environment
+
+Copy `.env.example` to `.env` and ensure `DATABASE_URL` is valid.
+
+Example:
+
+```env
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/ai_workforce?schema=public"
+```
+
+### 4) Sync Prisma schema
+
+```bash
+npm run prisma:generate
+npm run prisma:push
+```
+
+### 5) Start the app
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000), then go to `/workforce`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Available scripts
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- `npm run dev`: start dev server
+- `npm run build`: create production build
+- `npm run start`: start production server
+- `npm run lint`: run ESLint
+- `npm run prisma:generate`: generate Prisma client
+- `npm run prisma:push`: push schema to database
 
-## Learn More
+## Current behavior notes
 
-To learn more about Next.js, take a look at the following resources:
+- A chat **task** equals one `WorkforceChatSession`.
+- New messages are written to the selected session.
+- Session timestamps are updated on new messages.
+- Legacy messages without a session are backfilled into an "Earlier conversation" session when sessions are loaded.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Troubleshooting
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- If you see chat/session table errors:
+  - run `npm run prisma:push`
+  - restart dev server if needed
+- If `New Task` fails:
+  - check API logs from `src/app/api/workforce-graphs/[id]/chat/sessions/route.ts`
+  - verify PostgreSQL is running and reachable via `DATABASE_URL`
