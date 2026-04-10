@@ -13,7 +13,7 @@ export function defaultAgentData(label: string): AgentNodeData {
     label,
     description: "",
     jobDescription: "",
-    model: "gpt-4o",
+    model: "gemini-2.5-flash-lite",
     skills: [],
   };
 }

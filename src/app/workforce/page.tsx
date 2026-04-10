@@ -1,4 +1,4 @@
-import { WorkforceGraphEditor } from "@/components/workforce/workforce-graph-editor";
+import { WorkforceGraphEditorClient } from "@/components/workforce/workforce-graph-editor-client";
 
 export default function WorkforcePage() {
   return (
@@ -12,7 +12,7 @@ export default function WorkforcePage() {
         </p>
       </header>
 
-      <WorkforceGraphEditor />
+      <WorkforceGraphEditorClient />
     </section>
   );
 }

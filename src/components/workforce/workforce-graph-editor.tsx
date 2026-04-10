@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addEdge,
   Background,
@@ -53,16 +53,17 @@ const initialEdges: Edge[] = [
 ];
 
 const MODEL_OPTIONS = [
-  "gpt-4o",
-  "gpt-4o-mini",
-  "gpt-4-turbo",
-  "claude-3-5-sonnet",
-  "claude-3-opus",
+  "gemini-2.5-flash-lite",
   "gemini-2.0-flash",
+  "gemini-2.0-flash-lite",
+  "gemini-1.5-flash",
+  "gemini-1.5-pro",
 ] as const;
 
 const SKILL_OPTIONS = [
   "web_search",
+  "calculator",
+  "summarize",
   "code_interpreter",
   "browser_automation",
   "file_system",
@@ -93,6 +94,7 @@ interface GraphApiResponse {
 
 interface ChatMessage {
   id: string;
+  agentId?: string;
   role: "user" | "agent";
   content: string;
   createdAt: string;
@@ -111,6 +113,58 @@ interface ChatSessionRow {
 
 interface SessionsListResponse {
   data: ChatSessionRow[];
+}
+
+// ---------------------------------------------------------------------------
+// Minimal markdown renderer — handles bold, inline code, and bullet lists
+// ---------------------------------------------------------------------------
+function renderInline(text: string): React.ReactNode[] {
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith("**") && part.endsWith("**"))
+      return <strong key={i}>{part.slice(2, -2)}</strong>;
+    if (part.startsWith("`") && part.endsWith("`"))
+      return (
+        <code key={i} className="rounded bg-slate-700 px-1 py-0.5 font-mono text-xs text-cyan-300">
+          {part.slice(1, -1)}
+        </code>
+      );
+    return <span key={i}>{part}</span>;
+  });
+}
+
+function MarkdownContent({ text }: { text: string }) {
+  const lines = text.split("\n");
+  const nodes: React.ReactNode[] = [];
+  let listItems: React.ReactNode[] = [];
+  let key = 0;
+
+  const flushList = () => {
+    if (listItems.length === 0) return;
+    nodes.push(
+      <ul key={key++} className="my-1 ml-4 list-disc space-y-0.5">
+        {listItems}
+      </ul>,
+    );
+    listItems = [];
+  };
+
+  for (const line of lines) {
+    const bulletMatch = line.match(/^[\*\-] (.*)/);
+    if (bulletMatch) {
+      listItems.push(<li key={key++}>{renderInline(bulletMatch[1])}</li>);
+    } else {
+      flushList();
+      if (line.trim() === "") {
+        nodes.push(<div key={key++} className="h-2" />);
+      } else {
+        nodes.push(<p key={key++}>{renderInline(line)}</p>);
+      }
+    }
+  }
+  flushList();
+
+  return <div className="space-y-0.5 leading-relaxed">{nodes}</div>;
 }
 
 export function WorkforceGraphEditor() {
@@ -432,79 +486,117 @@ export function WorkforceGraphEditor() {
     }
   }, [activeChatAgentId, graphId]);
 
+  const [isRunning, setIsRunning] = useState(false);
+  const chatBottomRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to the latest message whenever messages or running state changes
+  useEffect(() => {
+    chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [activeChatMessages, isRunning]);
+
   const sendMessage = useCallback(async () => {
     const trimmed = chatInput.trim();
-    if (!trimmed || !activeChatAgent || !activeSessionId) return;
-
-    const now = new Date().toISOString();
-    const userMessage: ChatMessage = {
-      id: `${Date.now()}-user`,
-      role: "user",
-      content: trimmed,
-      createdAt: now,
-    };
-
-    const skillSummary =
-      activeChatAgent.data.skills.length > 0
-        ? activeChatAgent.data.skills.join(", ")
-        : "no configured skills";
-    const roleSummary = activeChatAgent.data.jobDescription || activeChatAgent.data.description;
-
-    const agentMessage: ChatMessage = {
-      id: `${Date.now()}-agent`,
-      role: "agent",
-      content: `I am ${activeChatAgent.data.label} (${activeChatAgent.data.model}). ${
-        roleSummary ? `Role: ${roleSummary}. ` : ""
-      }Available skills: ${skillSummary}. You said: "${trimmed}".`,
-      createdAt: new Date(Date.now() + 1).toISOString(),
-    };
-
-    setMessagesBySessionId((prev) => ({
-      ...prev,
-      [activeSessionId]: [...(prev[activeSessionId] ?? []), userMessage, agentMessage],
-    }));
-    setChatInput("");
+    if (!trimmed || !activeChatAgent || !activeSessionId || isRunning) return;
 
     if (!graphId) {
-      setChatStatusMessage("Save graph first to persist chat history.");
+      setChatStatusMessage("Save graph first to run agents.");
       return;
     }
 
+    // Optimistically add the user message to the UI
+    const userMessage: ChatMessage = {
+      id: `${Date.now()}-user`,
+      agentId: activeChatAgentId,
+      role: "user",
+      content: trimmed,
+      createdAt: new Date().toISOString(),
+    };
+    setMessagesBySessionId((prev) => ({
+      ...prev,
+      [activeSessionId]: [...(prev[activeSessionId] ?? []), userMessage],
+    }));
+    setChatInput("");
+    setChatStatusMessage("Running...");
+    setIsRunning(true);
+
     try {
-      setChatStatusMessage(null);
-      await Promise.all([
-        fetch(`/api/workforce-graphs/${graphId}/chat`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            agentId: activeChatAgentId,
-            sessionId: activeSessionId,
-            role: userMessage.role,
-            content: userMessage.content,
-          }),
+      const response = await fetch(`/api/workforce-graphs/${graphId}/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rootAgentId: activeChatAgentId,
+          input: trimmed,
+          sessionId: activeSessionId,
         }),
-        fetch(`/api/workforce-graphs/${graphId}/chat`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            agentId: activeChatAgentId,
-            sessionId: activeSessionId,
-            role: agentMessage.role,
-            content: agentMessage.content,
-          }),
-        }),
-      ]);
-      setSessionsByAgent((prev) => {
-        const list = prev[activeChatAgentId] ?? [];
-        const updated = list.map((s) =>
-          s.id === activeSessionId ? { ...s, updatedAt: new Date().toISOString() } : s,
-        );
-        return { ...prev, [activeChatAgentId]: updated };
       });
-    } catch {
-      setChatStatusMessage("Message sent locally, but failed to persist history.");
+
+      if (!response.ok || !response.body) {
+        throw new Error(`Run failed: ${response.statusText}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        sseBuffer += decoder.decode(value, { stream: true });
+
+        // SSE events are delimited by \n\n; buffer incomplete events across reads
+        const parts = sseBuffer.split("\n\n");
+        sseBuffer = parts.pop() ?? "";
+
+        for (const part of parts) {
+          const dataLine = part.split("\n").find((l) => l.startsWith("data: "));
+          if (!dataLine) continue;
+          const raw = dataLine.slice("data: ".length).trim();
+          if (!raw) continue;
+
+          let event: { type: string; agentId?: string; content: string };
+          try {
+            event = JSON.parse(raw) as typeof event;
+          } catch {
+            continue;
+          }
+
+          if (event.type === "step") {
+            // Intermediate steps are shown via the isRunning thinking indicator — not in the message list
+          } else if (event.type === "message") {
+            const finalMsg: ChatMessage = {
+              id: `${Date.now()}-agent`,
+              agentId: event.agentId ?? activeChatAgentId,
+              role: "agent",
+              content: event.content,
+              createdAt: new Date().toISOString(),
+            };
+            setMessagesBySessionId((prev) => ({
+              ...prev,
+              [activeSessionId]: [...(prev[activeSessionId] ?? []), finalMsg],
+            }));
+          } else if (event.type === "error") {
+            setChatStatusMessage(`Error: ${event.content}`);
+          } else if (event.type === "done") {
+            setChatStatusMessage(null);
+            setSessionsByAgent((prev) => {
+              const list = prev[activeChatAgentId] ?? [];
+              return {
+                ...prev,
+                [activeChatAgentId]: list.map((s) =>
+                  s.id === activeSessionId ? { ...s, updatedAt: new Date().toISOString() } : s,
+                ),
+              };
+            });
+          }
+        }
+      }
+    } catch (err) {
+      setChatStatusMessage(err instanceof Error ? err.message : "Run failed.");
+    } finally {
+      setIsRunning(false);
     }
-  }, [activeChatAgent, activeChatAgentId, activeSessionId, chatInput, graphId]);
+  }, [activeChatAgent, activeChatAgentId, activeSessionId, chatInput, graphId, isRunning]);
 
   return (
     <section className="space-y-4">
@@ -796,58 +888,132 @@ export function WorkforceGraphEditor() {
           </div>
         </div>
 
-        <div className="h-56 space-y-2 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950/80 p-3">
+        <div className="flex h-[28rem] flex-col gap-3 overflow-y-auto rounded-xl border border-slate-800 bg-slate-950/60 p-4">
           {!activeSessionId ? (
-            <p className="text-sm text-slate-500">
-              No active session. Click <strong className="text-slate-300">New Task</strong> to start a
-              chat, or pick a previous task above.
-            </p>
+            <div className="flex h-full items-center justify-center">
+              <p className="text-sm text-slate-500">
+                Click <strong className="text-slate-300">New Task</strong> to start chatting.
+              </p>
+            </div>
           ) : chatLoading ? (
-            <p className="text-sm text-slate-500">Loading messages…</p>
-          ) : activeChatMessages.length === 0 ? (
-            <p className="text-sm text-slate-500">
-              Empty session — send a message to begin this task.
-            </p>
+            <div className="flex h-full items-center justify-center">
+              <p className="text-sm text-slate-500">Loading…</p>
+            </div>
+          ) : activeChatMessages.length === 0 && !isRunning ? (
+            <div className="flex h-full items-center justify-center">
+              <p className="text-sm text-slate-500">Send a message to begin.</p>
+            </div>
           ) : (
-            activeChatMessages.map((message) => (
-              <div
-                key={message.id}
-                className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
-                  message.role === "user"
-                    ? "ml-auto bg-cyan-500/20 text-cyan-100"
-                    : "bg-slate-800 text-slate-100"
-                }`}
-              >
-                <p>{message.content}</p>
-              </div>
-            ))
+            <>
+              {activeChatMessages.map((message) =>
+                message.role === "user" ? (
+                  // User bubble — right aligned
+                  <div key={message.id} className="flex justify-end">
+                    <div className="max-w-[78%] rounded-2xl rounded-br-sm bg-cyan-500 px-4 py-2.5 text-sm text-slate-950 shadow-sm">
+                      <p className="leading-relaxed">{message.content}</p>
+                    </div>
+                  </div>
+                ) : (
+                  // Agent bubble — left aligned with icon + agent name
+                  (() => {
+                    const agentNode = message.agentId
+                      ? nodes.find((n) => n.id === message.agentId)
+                      : undefined;
+                    const agentLabel = agentNode?.data.label ?? "Agent";
+                    const initials = agentLabel
+                      .split(/\s+/)
+                      .map((w) => w[0])
+                      .slice(0, 2)
+                      .join("")
+                      .toUpperCase();
+                    return (
+                      <div key={message.id} className="flex items-start gap-2.5">
+                        <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-violet-600 text-[10px] font-bold text-white shadow">
+                          {initials}
+                        </div>
+                        <div className="max-w-[78%] rounded-2xl rounded-bl-sm border border-slate-700/60 bg-slate-800/80 px-4 py-3 text-sm text-slate-100 shadow-sm">
+                          <p className="mb-1.5 text-[11px] font-semibold text-violet-400">
+                            {agentLabel}
+                          </p>
+                          <MarkdownContent text={message.content} />
+                          <p className="mt-1.5 text-[10px] text-slate-500">
+                            {new Date(message.createdAt).toLocaleTimeString([], {
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })()
+                ),
+              )}
+
+              {/* Thinking indicator */}
+              {isRunning && (
+                <div className="flex items-start gap-2.5">
+                  <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-violet-600 text-[10px] font-bold text-white shadow">
+                    {activeChatAgent?.data.label
+                      .split(/\s+/)
+                      .map((w) => w[0])
+                      .slice(0, 2)
+                      .join("")
+                      .toUpperCase() ?? "AI"}
+                  </div>
+                  <div className="rounded-2xl rounded-bl-sm border border-slate-700/60 bg-slate-800/80 px-4 py-3">
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400 [animation-delay:0ms]" />
+                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400 [animation-delay:150ms]" />
+                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400 [animation-delay:300ms]" />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div ref={chatBottomRef} />
+            </>
           )}
         </div>
-        {chatStatusMessage ? <p className="mt-2 text-xs text-amber-300">{chatStatusMessage}</p> : null}
+        {chatStatusMessage ? (
+          <p className="mt-2 text-xs text-amber-400">{chatStatusMessage}</p>
+        ) : null}
 
-        <div className="mt-3 flex gap-2">
+        <div className="mt-3 flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 focus-within:border-cyan-500 focus-within:ring-1 focus-within:ring-cyan-500">
           <input
             type="text"
             value={chatInput}
             onChange={(e) => setChatInput(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") {
+              if (e.key === "Enter" && !e.shiftKey) {
                 void sendMessage();
               }
             }}
-            disabled={!activeSessionId}
-            className="flex-1 rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={!activeSessionId || isRunning}
+            className="flex-1 bg-transparent text-sm text-white placeholder:text-slate-500 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
             placeholder={
-              activeSessionId ? "Type your message in this task…" : "Select or start a task to chat…"
+              isRunning
+                ? "Agent is thinking…"
+                : activeSessionId
+                  ? "Message the agent…"
+                  : "Start a new task first…"
             }
           />
           <button
             type="button"
             onClick={() => void sendMessage()}
-            disabled={!activeSessionId}
-            className="rounded-md bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={!activeSessionId || isRunning || !chatInput.trim()}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-cyan-500 text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-40"
+            title="Send"
           >
-            Send
+            {isRunning ? (
+              <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+              </svg>
+            ) : (
+              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+              </svg>
+            )}
           </button>
         </div>
       </section>
